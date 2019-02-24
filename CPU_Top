@@ -1,0 +1,75 @@
+`timescale 1 ns/1 ns
+module CPU_Top(CLK, RST, Go, freq_switch, Total_T_sw, uncon_sw, succ_sw, AN, SEG);
+
+parameter N1 = 1_000_000;
+parameter N2 = 5_000_000;
+
+input CLK, RST, Go;
+input freq_switch;//改变频率的开关
+input Total_T_sw;//显示总周期数的开关
+input uncon_sw;//显示无条件分支数的开关
+input succ_sw;//显示条件分支成功数的开关
+output [7:0]AN;//选择哪个数码开关
+output [7:0]SEG;//数码管数字显开关
+
+wire CLK_N1;
+wire CLK_N2;
+reg CLK_N;
+wire [15:0]Total_T, uncon_branch_num, succ_branch_num;
+wire [31:0]LedData;
+wire [2:0]select;//选择哪一个数码管
+wire [3:0]num;//数码管显示的具体数字
+
+reg [2:0]choose;//选择显示的内容
+always@(Total_T_sw, uncon_sw, succ_sw)begin
+  if( (Total_T_sw) && (~uncon_sw) && (~succ_sw) )
+    choose = 3'b001;
+  else if( (~Total_T_sw) && (uncon_sw) && (~succ_sw) )
+    choose = 3'b010;
+  else if( (~Total_T_sw) && (~uncon_sw) && (succ_sw) )
+    choose = 3'b100;
+  else
+    choose = 3'b000;
+end
+
+//将16进制数转变为10进制数进行led显示
+wire [31:0]Total_T_Dec, uncon_branch_num_Dec, succ_branch_num_Dec;
+HexToDec hextodec1(Total_T, Total_T_Dec);//总周期数的切换
+HexToDec hextodec2(uncon_branch_num, uncon_branch_num_Dec);//无条件分支数的切换
+HexToDec hextodec3(succ_branch_num, succ_branch_num_Dec);//条件分支成功数的切换
+
+
+divider #(N1) d1(CLK, CLK_N1);
+divider #(N2) d2(CLK, CLK_N2);
+
+always@(*)begin
+  if(freq_switch == 0)
+    CLK_N = CLK_N2;
+  else
+    CLK_N = CLK_N1;
+end
+
+DataPath datapath(RST, Go, CLK_N, Total_T, uncon_branch_num, succ_branch_num, LedData);
+
+reg [31:0]show_on_Led;
+always@(*)begin
+  case (choose)
+    3'b001://显示总周期数
+    show_on_Led = Total_T_Dec;
+    3'b010://显示无条件分支数
+    show_on_Led = uncon_branch_num_Dec;
+    3'b100://显示条件分支成功数
+    show_on_Led = succ_branch_num_Dec;
+    3'b000://显示LedData的内容
+    show_on_Led = LedData;
+    default:
+    show_on_Led = 16'h0000000000000000;
+  endcase
+end
+display_control Display_Control(CLK, RST, show_on_Led, select, num);
+decoder3_8 Decoder3_8(select, AN);
+pattern Pattern(num, SEG);
+
+endmodule
+
+
