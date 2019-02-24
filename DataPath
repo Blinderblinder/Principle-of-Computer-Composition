@@ -1,0 +1,158 @@
+//2019.2.20
+//数据通路模块datapath
+
+module DataPath(RST, Go, CLK, Total_T, uncon_branch_num, succ_branch_num, LedData);
+
+input RST, Go, CLK;
+output [15:0] Total_T, uncon_branch_num, succ_branch_num;
+output [31:0] LedData;
+
+//------------------------------------------------------------------------------
+//PC寄存器
+wire [31:0] pc_Din, pc_Dout;
+wire pc_EN;//pc寄存器的使能端
+wire [31:0] pc_4;//PC+4
+wire branch;//判断是否为分支跳转
+wire bltz;
+pc_reg Pc_Reg(CLK, RST, pc_EN, pc_Din, pc_Dout);
+
+assign pc_4 = pc_Dout + 4;//PC+4
+assign pc_EN = ~(Syscall&&(~(R1_Dout==34))&&(~Go));
+assign bltz = ($signed(R1_Dout)<0)&&(BLTZ == 1);
+assign branch = JMP||BEQ_BNE||bltz;
+
+wire [31:0]J_JAL_jump;//J/JAL跳转
+assign J_JAL_jump = {pc_4[31:28], ins26, 2'b00};
+
+reg [31:0]immediate_extend;//立即数扩展
+always@(*)begin
+  if(SignedExt == 1)
+    immediate_extend <= {($signed(ins16)>>>16), ($signed(ins16))};
+  else
+    immediate_extend <= {16'h0000, ins16};
+end
+
+wire [31:0]con_branch_ins;//条件分支指令
+assign con_branch_ins = (immediate_extend<<2) + pc_4; 
+
+reg [31:0] pc_jump_addr;//PC地址跳转
+always@(*)begin
+  if (JMP == 1) begin
+    if (JR == 1)
+      pc_jump_addr = R1_Dout;
+    else
+      pc_jump_addr = J_JAL_jump;
+  end
+  else
+    pc_jump_addr = con_branch_ins;
+end
+
+assign pc_Din = (branch == 1)?pc_jump_addr:pc_4;
+
+//-------------------------------------------------------------------------------------
+
+//PC指令存储器
+wire [9:0] Rom_Addr;
+wire [31:0] Rom_Dout;
+Rom Pc_Rom(Rom_Addr, Rom_Dout);
+assign Rom_Addr = pc_Dout[11:2];//指令存储器取指地址
+
+//指令译码器
+wire [5:0] OP, Func;
+wire [4:0] rs, rt, rd, shamt;
+wire [15:0] ins16;
+wire [25:0] ins26;
+instruDecoder InstruDecoder(Rom_Dout, OP, rs, rt, rd, shamt, Func, ins16, ins26);
+
+
+//寄存器文件
+wire [4:0] R1_Addr, R2_Addr;
+wire [31:0] Reg_Din, R1_Dout, R2_Dout;
+wire WE;
+reg [4:0]W_Addr;
+RegFile Reg_File(R1_Addr, R2_Addr, W_Addr, Reg_Din, WE, CLK, R1_Dout, R2_Dout);
+assign WE = RegWrite;
+assign R1_Addr = (Syscall == 1) ? 2 : rs;//选择读的寄存器R1的地址
+assign R2_Addr = (Syscall == 1) ? 4 : rt;//选择读的寄存器R2的地址
+//写入的寄存器的地址
+always@(*)begin
+  if (JAL == 1)
+    W_Addr <= 5'h1f;
+  else begin
+    if (RegDst == 1)
+      W_Addr <= rd;
+    else
+      W_Addr <= rt;
+  end
+end
+
+//处理lui指令
+wire [31:0]lui;
+assign lui = {ins16, 16'h0000};
+
+//寄存器文件的输入端
+wire [31:0]mem_to_reg_D1;
+assign mem_to_reg_D1 = (MemToReg==1)?mem_Dout:ALU_R;
+assign Reg_Din = (JAL==1)?pc_4:((LUI==1)?lui:mem_to_reg_D1);
+
+
+
+
+//-----------------------------------------------------------------------
+
+
+//硬布线控制器
+wire MemToReg, MemWrite, AluSrcB, RegWrite, JAL, JMP, JR, RegDst, BLTZ, LUI, SB, Syscall, Beq, Bne;
+wire SignedExt;
+wire [3:0] AluOP;
+controller Controller(OP, Func, AluOP, MemToReg, MemWrite, AluSrcB, RegWrite, Syscall, SignedExt, RegDst, Beq, Bne, JR, JMP, JAL, LUI, BLTZ, SB);
+
+//ALU
+wire [31:0] ALU_A, ALU_B, ALU_R, ALU_R2;
+wire ALU_Equal;
+wire BEQ_BNE;
+alu ALU(AluOP, ALU_A, ALU_B, shamt, ALU_R, ALU_R2, ALU_Equal);
+assign ALU_A = R1_Dout; 
+assign ALU_B = (AluSrcB == 1)?(immediate_extend):(R2_Dout);
+assign BEQ_BNE = ((Beq&ALU_Equal)|(~ALU_Equal&Bne));
+
+//memory
+wire [9:0] mem_addr;
+wire [31:0] mem_Din, mem_Dout;
+wire [3:0] Sel;
+CS3410_MIPS_RAM Memory(mem_addr, mem_Din, MemWrite, Sel, CLK, mem_Dout);
+assign mem_addr = ALU_R[11:2];
+
+// wire [1:0]select;//地址低两位做片选信号
+// assign select = ALU_R[1:0];
+// wire [3:0]sel;
+// assign sel = 1<<ALU_R[1:0];//当按字节读时取具体位数的片选信号
+//处理SB指令
+//assign Sel = (SB == 1)?sel:4'hf;
+assign Sel = (SB == 1)?(1<<ALU_R[1:0]):4'b1111;
+// wire [31:0]mem_Din1, mem_Din2;
+// assign mem_Din1 = R2_Dout;//按字取时的输入
+// assign mem_Din2 = {R2_Dout[7:0], R2_Dout[7:0], R2_Dout[7:0], R2_Dout[7:0]};//执行SB按字节取时的输入
+// assign mem_Din = (SB == 1)?mem_Din2:mem_Din1;
+
+assign mem_Din = (SB==1)?({R2_Dout[7:0], R2_Dout[7:0],R2_Dout[7:0],R2_Dout[7:0]}):R2_Dout;
+
+
+
+//LedData
+wire LedEnable;
+assign LedEnable = Syscall&&(R1_Dout==34);
+pc_reg led_reg(CLK, RST, LedEnable, R2_Dout, LedData);
+
+//三个计数
+//总周期数统计
+counter T_counter(pc_EN, CLK, RST, Total_T);
+//无条件分支数统计
+counter uncon_branch(JMP, CLK, RST, uncon_branch_num);
+//成功条件分支数统计
+counter succ_branch(BEQ_BNE, CLK, RST, succ_branch_num);
+
+endmodule
+
+
+
